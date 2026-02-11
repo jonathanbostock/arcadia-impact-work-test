@@ -6,7 +6,12 @@ from typing import Iterable
 
 import torch
 import transformers
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    StoppingCriteria,
+    StoppingCriteriaList,
+)
 from huggingface_hub import constants as hf_constants
 
 if not hasattr(transformers, "TRANSFORMERS_CACHE"):
@@ -33,6 +38,28 @@ RFH_HEADS: list[tuple[int, int]] = [
     (18, 2),
 ]
 PRIMARY_HEAD: tuple[int, int] = (14, 7)
+
+
+class StopOnMovesLine(StoppingCriteria):
+    def __init__(self, tokenizer, window: int = 2000) -> None:
+        self.tokenizer = tokenizer
+        self.window = window
+        self._moves_re = re.compile(r"^[UDLR]+$")
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)
+        tail = text[-self.window :]
+        if "</think>" in tail:
+            after = tail.split("</think>")[-1]
+            lines = [line.strip() for line in after.splitlines() if line.strip()]
+            if lines and self._moves_re.fullmatch(lines[-1]):
+                return True
+
+        lines = [line.strip() for line in tail.splitlines() if line.strip()]
+        if lines and self._moves_re.fullmatch(lines[-1]):
+            return True
+
+        return False
 
 
 def load_model(model_name: str) -> HookedTransformer:
@@ -74,17 +101,18 @@ def load_model(model_name: str) -> HookedTransformer:
         trust_remote_code=True,
     )
     try:
-        return HookedTransformer.from_pretrained(
+        model = HookedTransformer.from_pretrained(
             model_name,
             device=device,
             n_devices=1,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
+            fold_value_biases=False,
             hf_model=hf_model,
             tokenizer=tokenizer,
         )
     except Exception:
-        return HookedTransformer.from_pretrained(
+        model = HookedTransformer.from_pretrained(
             model_name,
             device=device,
             n_devices=1,
@@ -92,16 +120,52 @@ def load_model(model_name: str) -> HookedTransformer:
             trust_remote_code=True,
             fold_ln=False,
             center_writing_weights=False,
+            fold_value_biases=False,
             hf_model=hf_model,
             tokenizer=tokenizer,
         )
+
+    model.hf_model = hf_model
+    model.hf_tokenizer = tokenizer
+    _ensure_rotary_cache(model, n_ctx=8192)
+    return model
+
+
+def _ensure_rotary_cache(model: HookedTransformer, n_ctx: int) -> None:
+    if model.cfg.n_ctx >= n_ctx:
+        return
+
+    model.cfg.n_ctx = n_ctx
+    for block in model.blocks:
+        attn = block.attn
+        attn.cfg.n_ctx = n_ctx
+        causal_mask = torch.tril(torch.ones((n_ctx, n_ctx), device=attn.IGNORE.device)).bool()
+        if attn.attn_type == "global":
+            attn.mask = causal_mask
+        else:
+            if not isinstance(attn.cfg.window_size, int):
+                raise ValueError("Window size must be an integer for local attention")
+            attn.mask = torch.triu(causal_mask, 1 - attn.cfg.window_size)
+
+        if attn.cfg.positional_embedding_type != "rotary":
+            continue
+        sin, cos = attn.calculate_sin_cos_rotary(
+            attn.cfg.rotary_dim,
+            n_ctx,
+            base=attn.cfg.rotary_base,
+            dtype=attn.cfg.dtype,
+        )
+        attn.rotary_sin = sin.to(attn.rotary_sin.device)
+        attn.rotary_cos = cos.to(attn.rotary_cos.device)
 
 
 def build_prompt(text_grid: str) -> str:
     return (
         "You are given a Sokoban puzzle. Plan your moves carefully, then "
         "output the complete solution as a sequence of moves (U=up, D=down, "
-        "L=left, R=right), with no other text in your final answer.\n\n"
+        "L=left, R=right), with no other text in your final answer.\n"
+        "Use <think>...</think> for your reasoning, then output the final move "
+        "sequence on its own line.\n\n"
         "Puzzle:\n"
         f"{text_grid}\n"
     )
@@ -146,19 +210,39 @@ def run_inference(
     prompt: str,
     max_new_tokens: int = 4096,
 ) -> InferenceResult:
-    input_tokens = model.to_tokens(prompt, prepend_bos=True)
-    with torch.no_grad():
-        output_tokens = model.generate(
-            input_tokens,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=0.0,
-            top_p=1.0,
-            eos_token_id=model.tokenizer.eos_token_id,
-        )
+    if hasattr(model, "hf_model"):
+        tokenizer = model.hf_tokenizer
+        encoded = tokenizer(prompt, return_tensors="pt")
+        input_ids = encoded.input_ids.to(model.hf_model.device)
+        attention_mask = encoded.attention_mask.to(model.hf_model.device)
+        stopping = StoppingCriteriaList([StopOnMovesLine(tokenizer)])
+        with torch.no_grad():
+            output_tokens = model.hf_model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                temperature=0.0,
+                top_p=1.0,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.eos_token_id,
+                stopping_criteria=stopping,
+                attention_mask=attention_mask,
+                use_cache=True,
+            )
+    else:
+        input_tokens = model.to_tokens(prompt, prepend_bos=True)
+        with torch.no_grad():
+            output_tokens = model.generate(
+                input_tokens,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                temperature=0.0,
+                top_p=1.0,
+                eos_token_id=model.tokenizer.eos_token_id,
+            )
 
     token_list = output_tokens[0].tolist()
-    text = model.to_string(output_tokens[0])
+    text = model.tokenizer.decode(output_tokens[0], skip_special_tokens=False)
     token_strings = [model.tokenizer.decode([tok]) for tok in token_list]
 
     if len(token_list) > 3000:
@@ -191,17 +275,30 @@ def extract_attention(
 ) -> dict[tuple[int, int], torch.Tensor]:
     """Extract attention patterns for selected heads.
 
-    Reading all heads for long sequences can be huge, so we slice the cache
-    directly for the required heads.
+    Use lightweight hooks to avoid caching full attention tensors.
     """
     head_pairs = list(head_pairs)
     attn_by_head: dict[tuple[int, int], torch.Tensor] = {}
+    head_map: dict[int, list[int]] = {}
+    for layer, head in head_pairs:
+        head_map.setdefault(layer, []).append(head)
+
+    fwd_hooks = []
+
+    def make_hook(layer: int):
+        def hook(pattern: torch.Tensor, hook):
+            for head in head_map[layer]:
+                attn_by_head[(layer, head)] = pattern[0, head].detach().float().cpu()
+            return pattern
+
+        return hook
+
+    for layer in head_map:
+        hook_name = f"blocks.{layer}.attn.hook_pattern"
+        fwd_hooks.append((hook_name, make_hook(layer)))
 
     with torch.no_grad():
-        _, cache = model.run_with_cache(tokens, return_type="logits")
-
-    for layer, head in head_pairs:
-        attn = cache["pattern", layer][0, head].detach().cpu()
-        attn_by_head[(layer, head)] = attn
+        with model.hooks(fwd_hooks=fwd_hooks):
+            _ = model(tokens, return_type="logits")
 
     return attn_by_head

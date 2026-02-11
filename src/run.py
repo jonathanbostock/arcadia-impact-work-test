@@ -22,7 +22,7 @@ class PuzzleRecord:
     tokens: object
 
 
-def _select_samples(records: list[PuzzleRecord], sample_size: int = 3) -> list[PuzzleRecord]:
+def _select_samples(records: list[PuzzleRecord], sample_size: int = 9) -> list[PuzzleRecord]:
     valid = [record for record in records if record.valid]
     invalid = [record for record in records if record.parseable and not record.valid]
 
@@ -43,7 +43,7 @@ def _select_samples(records: list[PuzzleRecord], sample_size: int = 3) -> list[P
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run R1-Qwen-7B Sokoban attention probes.")
-    parser.add_argument("--num-puzzles", type=int, default=20)
+    parser.add_argument("--num-puzzles", type=int, default=9)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=4096)
     parser.add_argument("--model", type=str, default="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")

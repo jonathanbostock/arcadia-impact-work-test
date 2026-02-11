@@ -7,6 +7,7 @@ from typing import Iterable
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
+from matplotlib.colors import PowerNorm
 
 
 @dataclass
@@ -28,13 +29,19 @@ def plot_head_attention(
     if not sample_list:
         return
 
-    fig, axes = plt.subplots(1, len(sample_list), figsize=(5 * len(sample_list), 5))
-    if len(sample_list) == 1:
-        axes = [axes]
+    rows, cols = 3, 3
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 5 * rows))
+    axes_list = list(axes.flat)
 
-    for ax, sample in zip(axes, sample_list):
+    for ax, sample in zip(axes_list, sample_list):
         attn = sample.attention
-        ax.imshow(attn, cmap="bone", origin="lower", aspect="auto")
+        vmax = float(np.quantile(attn, 0.99))
+        if vmax <= 0:
+            vmax = float(attn.max()) if attn.size else 1.0
+        if vmax <= 0:
+            vmax = 1.0
+        norm = PowerNorm(gamma=0.3, vmin=0.0, vmax=vmax)
+        ax.imshow(attn, cmap="bone", origin="lower", aspect="auto", norm=norm)
         ax.set_xlabel("Key token index")
         ax.set_ylabel("Query token index")
 
@@ -60,6 +67,9 @@ def plot_head_attention(
 
         status = "valid" if sample.valid else "invalid"
         ax.set_title(f"Puzzle {sample.index:03d} ({status})")
+
+    for ax in axes_list[len(sample_list) :]:
+        ax.axis("off")
 
     layer, head_idx = head
     fig.suptitle(f"Attention L{layer}.H{head_idx}")
