@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import torch
+import transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import constants as hf_constants
+
+if not hasattr(transformers, "TRANSFORMERS_CACHE"):
+    transformers.TRANSFORMERS_CACHE = hf_constants.HF_HUB_CACHE
+
 from transformer_lens import HookedTransformer
 
 
@@ -29,21 +36,64 @@ PRIMARY_HEAD: tuple[int, int] = (14, 7)
 
 
 def load_model(model_name: str) -> HookedTransformer:
+    from transformer_lens import loading_from_pretrained as loading
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    try:
+        from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+
+        if not hasattr(Qwen2Config, "rope_theta"):
+            def _rope_theta(self):
+                rope_params = getattr(self, "rope_parameters", None)
+                if isinstance(rope_params, dict) and "rope_theta" in rope_params:
+                    return rope_params["rope_theta"]
+                return 10000
+
+            Qwen2Config.rope_theta = property(_rope_theta)
+    except Exception:
+        pass
+
+    if model_name not in loading.OFFICIAL_MODEL_NAMES:
+        loading.OFFICIAL_MODEL_NAMES.append(model_name)
+        loading.MODEL_ALIASES[model_name] = [model_name]
+
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,
+        device_map=device,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+    )
+    if not hasattr(hf_model.config, "rope_theta"):
+        rope_params = getattr(hf_model.config, "rope_parameters", None)
+        if isinstance(rope_params, dict) and "rope_theta" in rope_params:
+            hf_model.config.rope_theta = rope_params["rope_theta"]
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+    )
     try:
         return HookedTransformer.from_pretrained(
             model_name,
-            device_map="auto",
+            device=device,
+            n_devices=1,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
+            hf_model=hf_model,
+            tokenizer=tokenizer,
         )
     except Exception:
         return HookedTransformer.from_pretrained(
             model_name,
-            device_map="auto",
+            device=device,
+            n_devices=1,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
             fold_ln=False,
             center_writing_weights=False,
+            hf_model=hf_model,
+            tokenizer=tokenizer,
         )
 
 

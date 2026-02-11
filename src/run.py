@@ -4,9 +4,9 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
-from inference import RFH_HEADS, build_prompt, extract_attention, load_model, run_inference
-from puzzle import PuzzleState, generate_puzzles, save_puzzles, validate_solution
-from visualize import SampleAttention, plot_head_attention
+from .inference import RFH_HEADS, build_prompt, extract_attention, load_model, run_inference
+from .puzzle import PuzzleState, generate_puzzles, save_puzzles, validate_solution
+from .visualize import SampleAttention, plot_head_attention
 
 
 @dataclass

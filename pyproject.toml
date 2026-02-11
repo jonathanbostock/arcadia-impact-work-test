@@ -9,6 +9,7 @@ dependencies = [
 	"gym-sokoban",
 	"matplotlib",
 	"numpy",
+	"setuptools",
 	"torch",
 	"transformer-lens",
 	"transformers",

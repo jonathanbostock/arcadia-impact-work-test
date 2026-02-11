@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 import gym
+import gym_sokoban
 import numpy as np
 
 
@@ -64,12 +65,13 @@ def generate_puzzles(
     for index in range(num_puzzles):
         env_seed = int(rng.integers(0, 1_000_000))
         env = gym.make(
-            "Sokoban-v0",
+            "Sokoban-v1",
             dim_room=dim_room,
             num_boxes=num_boxes,
             max_steps=max_steps,
         )
-        env.reset(seed=env_seed)
+        env.seed(env_seed)
+        env.reset()
         room_fixed = np.array(env.unwrapped.room_fixed, copy=True)
         room_state = np.array(env.unwrapped.room_state, copy=True)
         text_grid = _render_text_grid(room_fixed, room_state)
